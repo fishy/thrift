@@ -42,6 +42,24 @@ type headerMeta struct {
 
 const headerMetaSize = 10
 
+type clientType int
+
+const (
+	clientUnknown clientType = iota
+	clientHeaders
+	clientFramedBinary
+	clientUnframedBinary
+	clientFramedCompact
+	clientUnframedCompact
+)
+
+// byteReader is the combined interface of io.ByteReader and io.Reader, needed
+// by readString.
+type byteReader interface {
+	io.ByteReader
+	io.Reader
+}
+
 // Constants defined in THeader format:
 // https://github.com/apache/thrift/blob/master/doc/specs/HeaderFormat.md
 const (
@@ -53,17 +71,6 @@ const (
 
 // THeaderMap is the type of the header map in THeader transport.
 type THeaderMap map[string]string
-
-type clientType int
-
-const (
-	clientUnknown clientType = iota
-	clientHeaders
-	clientFramedBinary
-	clientUnframedBinary
-	clientFramedCompact
-	clientUnframedCompact
-)
 
 // THeaderSubprotocolID is the subprotocol id used in THeader protocol.
 type THeaderSubprotocolID int64
@@ -105,50 +112,114 @@ var supportedTransformIDs = map[THeaderTransformID]bool{
 	TransformZlib: true,
 }
 
-// ReadTransform transform the data stream for read.
-func (id THeaderTransformID) ReadTransform(r io.Reader) (io.ReadCloser, error) {
-	switch id {
-	default:
-		return nil, NewTProtocolExceptionWithType(
-			NOT_IMPLEMENTED,
-			fmt.Errorf("THeaderTransformID %d not supported", id),
-		)
-	case TransformNone:
-		// Wrap it with ioutil.NopCloser is important because it makes
-		// sure that the Close function on the returned io.ReadCloser is
-		// a noop, so it's safe to be pushed into closerStack without
-		// worrying about double closing.
-		return ioutil.NopCloser(r), nil
-	case TransformZlib:
-		// closerStack in THeaderTransport is needed because
-		// zlib.Reader.Close does not call the Close function of the
-		// underlying ReadCloser.
-		return zlib.NewReader(r)
+// TransformReader is an io.ReadCloser that handles transforms reading.
+type TransformReader struct {
+	io.Reader
+
+	closers []io.Closer
+}
+
+var _ io.ReadCloser = (*TransformReader)(nil)
+
+// NewTransformReaderWithCapacity initializes a TransformReader with expected
+// closers capacity.
+//
+// If you don't know the closers capacity before hand, just use
+//
+//     &TransformReader{Reader: baseReader}
+//
+// would be sufficient.
+func NewTransformReaderWithCapacity(baseReader io.Reader, capacity int) *TransformReader {
+	return &TransformReader{
+		Reader:  baseReader,
+		closers: make([]io.Closer, 0, capacity),
 	}
 }
 
-// Like ioutil.nopCloser, but for writers.
-type writerWrapper struct {
-	io.Writer
-}
-
-func (writerWrapper) Close() error {
+// Close calls the underlying closers in appropriate order,
+// stops at and returns the first error encountered.
+func (tr *TransformReader) Close() error {
+	// Call closers in reversed order
+	for i := len(tr.closers) - 1; i >= 0; i-- {
+		if err := tr.closers[i].Close(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-// WriteTransform transform the data stream for write.
-func (id THeaderTransformID) WriteTransform(w io.Writer) (io.WriteCloser, error) {
+// AddTransform adds a transform.
+func (tr *TransformReader) AddTransform(id THeaderTransformID) error {
 	switch id {
 	default:
-		return nil, NewTProtocolExceptionWithType(
+		return NewTProtocolExceptionWithType(
 			NOT_IMPLEMENTED,
 			fmt.Errorf("THeaderTransformID %d not supported", id),
 		)
 	case TransformNone:
-		return writerWrapper{w}, nil
+		// no-op
 	case TransformZlib:
-		return zlib.NewWriter(w), nil
+		readCloser, err := zlib.NewReader(tr.Reader)
+		if err != nil {
+			return err
+		}
+		tr.Reader = readCloser
+		tr.closers = append(tr.closers, readCloser)
 	}
+	return nil
+}
+
+// TransformWriter is an io.WriteCloser that handles transforms writing.
+type TransformWriter struct {
+	io.Writer
+
+	closers []io.Closer
+}
+
+var _ io.WriteCloser = (*TransformWriter)(nil)
+
+// NewTransformWriter creates a new TransformWriter with base writer and transforms.
+func NewTransformWriter(baseWriter io.Writer, transforms []THeaderTransformID) (io.WriteCloser, error) {
+	writer := &TransformWriter{
+		Writer:  baseWriter,
+		closers: make([]io.Closer, 0, len(transforms)),
+	}
+	for _, id := range transforms {
+		if err := writer.AddTransform(id); err != nil {
+			return nil, err
+		}
+	}
+	return writer, nil
+}
+
+// Close calls the underlying closers in appropriate order,
+// stops at and returns the first error encountered.
+func (tw *TransformWriter) Close() error {
+	// Call closers in reversed order
+	for i := len(tw.closers) - 1; i >= 0; i-- {
+		if err := tw.closers[i].Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AddTransform adds a transform.
+func (tw *TransformWriter) AddTransform(id THeaderTransformID) error {
+	switch id {
+	default:
+		return NewTProtocolExceptionWithType(
+			NOT_IMPLEMENTED,
+			fmt.Errorf("THeaderTransformID %d not supported", id),
+		)
+	case TransformNone:
+		// no-op
+	case TransformZlib:
+		writeCloser := zlib.NewWriter(tw.Writer)
+		tw.Writer = writeCloser
+		tw.closers = append(tw.closers, writeCloser)
+	}
+	return nil
 }
 
 // THeaderInfoType is the type id of the info headers.
@@ -172,25 +243,25 @@ type THeaderTransport struct {
 
 	transport TTransport
 
-	reader *bufio.Reader
-	// frameReader should be a bufio.Reader wrapped io.LimitedReader (with
-	// possible other wrappers, like zlib.Reader, in between). The limit on
-	// LimitedReader would be the frame size so at the end of frame it will
-	// return EOF error and we should start reading the next frame.
-	// When frameReader is nil, reader should be used for reading.
-	frameReader *bufio.Reader
-	// Closers to be called at the end of the frame reading.
-	readClosers []io.Closer
+	// THeaderMap for read and write
+	readHeaders  THeaderMap
+	writeHeaders THeaderMap
 
+	// Reading related variables.
+	reader *bufio.Reader
+	// When frame is detected, we read the frame fully into frameBuffer.
+	frameBuffer bytes.Buffer
+	// When it's non-nil, Read should read from frameReader instead of
+	// reader, and EOF error indicates end of frame instead of end of all
+	// transport.
+	frameReader io.ReadCloser
+
+	// Writing related variables
 	writeBuffer     bytes.Buffer
 	writeTransforms []THeaderTransformID
 
 	clientType clientType
 	protocolID THeaderSubprotocolID
-
-	// THeaderMap for read and write
-	readHeaders  THeaderMap
-	writeHeaders THeaderMap
 }
 
 var _ TTransport = (*THeaderTransport)(nil)
@@ -253,13 +324,17 @@ func (t *THeaderTransport) ReadFrame() error {
 	}
 	t.reader.Discard(size32)
 
-	t.frameReader = bufio.NewReader(io.LimitReader(t.reader, int64(frameSize)))
-
-	// Peek and handle the next 32 bits.
-	buf, err = t.frameReader.Peek(size32)
+	_, err = io.Copy(
+		&t.frameBuffer,
+		io.LimitReader(t.reader, int64(frameSize)),
+	)
 	if err != nil {
 		return err
 	}
+	t.frameReader = ioutil.NopCloser(&t.frameBuffer)
+
+	// Peek and handle the next 32 bits.
+	buf = t.frameBuffer.Bytes()[:size32]
 	version := binary.BigEndian.Uint32(buf)
 	if version&THeaderHeaderMask == THeaderHeaderMagic {
 		t.clientType = clientHeaders
@@ -273,11 +348,24 @@ func (t *THeaderTransport) ReadFrame() error {
 		t.clientType = clientFramedCompact
 		return nil
 	}
-	t.frameReader = nil
+	if err := t.endOfFrame(); err != nil {
+		return err
+	}
 	return NewTProtocolExceptionWithType(
 		NOT_IMPLEMENTED,
 		errors.New("unsupported client transport type"),
 	)
+}
+
+// endOfFrame does end of frame handlings.
+//
+// It closes frameReader, and also resets frame related states.
+func (t *THeaderTransport) endOfFrame() error {
+	defer func() {
+		t.frameBuffer.Reset()
+		t.frameReader = nil
+	}()
+	return t.frameReader.Close()
 }
 
 func (t *THeaderTransport) parseHeaders(frameSize uint32) error {
@@ -287,7 +375,7 @@ func (t *THeaderTransport) parseHeaders(frameSize uint32) error {
 
 	var err error
 	var meta headerMeta
-	if err = binary.Read(t.frameReader, binary.BigEndian, &meta); err != nil {
+	if err = binary.Read(&t.frameBuffer, binary.BigEndian, &meta); err != nil {
 		return err
 	}
 	frameSize -= headerMetaSize
@@ -301,59 +389,52 @@ func (t *THeaderTransport) parseHeaders(frameSize uint32) error {
 		)
 	}
 	var headerBuf bytes.Buffer
-	_, err = io.Copy(&headerBuf, io.LimitReader(t.frameReader, headerLength))
+	_, err = io.Copy(&headerBuf, io.LimitReader(&t.frameBuffer, headerLength))
 	if err != nil {
 		return err
 	}
 
 	// At this point the header is already read into headerBuf,
-	// and t.frameReader starts from the actual payload.
-	headerReader := bufio.NewReader(&headerBuf)
-	protoID, err := binary.ReadVarint(headerReader)
+	// and t.frameBuffer starts from the actual payload.
+	protoID, err := binary.ReadVarint(&headerBuf)
 	if err != nil {
 		return err
 	}
 	t.protocolID = THeaderSubprotocolID(protoID)
 	var transformCount int64
-	transformCount, err = binary.ReadVarint(headerReader)
+	transformCount, err = binary.ReadVarint(&headerBuf)
 	if err != nil {
 		return err
 	}
 	if transformCount > 0 {
-		t.readClosers = make([]io.Closer, transformCount)
+		reader := NewTransformReaderWithCapacity(
+			&t.frameBuffer,
+			int(transformCount),
+		)
+		t.frameReader = reader
 		transformIDs := make([]THeaderTransformID, transformCount)
 		for i := 0; i < int(transformCount); i++ {
-			id, err := binary.ReadVarint(headerReader)
+			id, err := binary.ReadVarint(&headerBuf)
 			if err != nil {
 				return err
 			}
 			transformIDs[i] = THeaderTransformID(id)
 		}
-		var reader io.Reader = t.frameReader
 		// The transform IDs on the wire was added based on the order of
 		// writing, so on the reading side we need to reverse the order.
 		for i := transformCount - 1; i >= 0; i-- {
 			id := transformIDs[i]
-			wrapped, err := id.ReadTransform(reader)
-			if err != nil {
+			if err := reader.AddTransform(id); err != nil {
 				return err
 			}
-			reader = wrapped
-			// closers are added in the reverse order, so when we
-			// close them on the normal order it naturally works as
-			// a stack.
-			t.readClosers[i] = wrapped
 		}
-		t.frameReader = bufio.NewReader(reader)
-	} else {
-		t.readClosers = nil
 	}
 
 	// The info part does not use the transforms yet, so it's
-	// important to continue using headerReader.
+	// important to continue using headerBuf.
 	headers := make(THeaderMap)
 	for {
-		infoType, err := binary.ReadVarint(headerReader)
+		infoType, err := binary.ReadVarint(&headerBuf)
 		if err == io.EOF {
 			break
 		}
@@ -361,16 +442,16 @@ func (t *THeaderTransport) parseHeaders(frameSize uint32) error {
 			return err
 		}
 		if THeaderInfoType(infoType) == InfoKeyValue {
-			count, err := binary.ReadVarint(headerReader)
+			count, err := binary.ReadVarint(&headerBuf)
 			if err != nil {
 				return err
 			}
 			for i := 0; i < int(count); i++ {
-				key, err := readString(headerReader)
+				key, err := readString(&headerBuf)
 				if err != nil {
 					return err
 				}
-				value, err := readString(headerReader)
+				value, err := readString(&headerBuf)
 				if err != nil {
 					return err
 				}
@@ -399,18 +480,15 @@ func (t *THeaderTransport) needReadFrame() bool {
 	return false
 }
 
-func (t *THeaderTransport) Read(p []byte) (int, error) {
-	if err := t.ReadFrame(); err != nil {
-		return 0, err
+func (t *THeaderTransport) Read(p []byte) (read int, err error) {
+	if err = t.ReadFrame(); err != nil {
+		return
 	}
 	if t.frameReader != nil {
-		read, err := t.frameReader.Read(p)
+		read, err = t.frameReader.Read(p)
 		if err == io.EOF {
-			t.frameReader = nil
-			for _, closer := range t.readClosers {
-				if err := closer.Close(); err != nil {
-					return read, err
-				}
+			if err = t.endOfFrame(); err != nil {
+				return
 			}
 			if read < len(p) {
 				var nextRead int
@@ -418,7 +496,7 @@ func (t *THeaderTransport) Read(p []byte) (int, error) {
 				read += nextRead
 			}
 		}
-		return read, err
+		return
 	}
 	return t.reader.Read(p)
 }
@@ -489,24 +567,15 @@ func (t *THeaderTransport) Flush(ctx context.Context) error {
 			return NewTTransportExceptionFromError(err)
 		}
 
-		var writer io.Writer = &payload
-		closers := make([]io.Closer, len(t.writeTransforms))
-		for i, transform := range t.writeTransforms {
-			wrapped, err := transform.WriteTransform(writer)
-			if err != nil {
-				return NewTTransportExceptionFromError(err)
-			}
-			writer = wrapped
-			closers[i] = wrapped
+		writer, err := NewTransformWriter(&payload, t.writeTransforms)
+		if err != nil {
+			return NewTTransportExceptionFromError(err)
 		}
 		if _, err := io.Copy(writer, &t.writeBuffer); err != nil {
 			return NewTTransportExceptionFromError(err)
 		}
-		for i := len(closers) - 1; i >= 0; i-- {
-			// We need to close the closers in reverse order
-			if err := closers[i].Close(); err != nil {
-				return NewTTransportExceptionFromError(err)
-			}
+		if err := writer.Close(); err != nil {
+			return NewTTransportExceptionFromError(err)
 		}
 
 		// First write frame length
@@ -611,7 +680,7 @@ func (t *THeaderTransport) isFramed() bool {
 	}
 }
 
-func readString(r *bufio.Reader) (string, error) {
+func readString(r byteReader) (string, error) {
 	size, err := binary.ReadVarint(r)
 	if err != nil {
 		return "", err

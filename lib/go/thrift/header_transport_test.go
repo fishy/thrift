@@ -34,9 +34,17 @@ func TestTHeaderHeadersReadWrite(t *testing.T) {
 	const value1 = "value1"
 	const key2 = "key2"
 	const value2 = "value2"
-	const payload = "hello, world\n"
+	const payload1 = "hello, world1\n"
+	const payload2 = "hello, world2\n"
 
 	// Write
+	if err := writer.AddTransform(TransformZlib); err != nil {
+		t.Fatalf(
+			"writer.AddTransform(TransformZlib) returned error: %v",
+			err,
+		)
+	}
+	// Use double zlib to make sure that we close them in the right order.
 	if err := writer.AddTransform(TransformZlib); err != nil {
 		t.Fatalf(
 			"writer.AddTransform(TransformZlib) returned error: %v",
@@ -51,7 +59,13 @@ func TestTHeaderHeadersReadWrite(t *testing.T) {
 	}
 	writer.SetWriteHeader(key1, value1)
 	writer.SetWriteHeader(key2, value2)
-	if _, err := writer.Write([]byte(payload)); err != nil {
+	if _, err := writer.Write([]byte(payload1)); err != nil {
+		t.Errorf("writer.Write returned error: %v", err)
+	}
+	if err := writer.Flush(context.Background()); err != nil {
+		t.Errorf("writer.Flush returned error: %v", err)
+	}
+	if _, err := writer.Write([]byte(payload2)); err != nil {
 		t.Errorf("writer.Write returned error: %v", err)
 	}
 	if err := writer.Flush(context.Background()); err != nil {
@@ -63,8 +77,12 @@ func TestTHeaderHeadersReadWrite(t *testing.T) {
 	if err != nil {
 		t.Errorf("Read returned error: %v", err)
 	}
-	if string(read) != payload {
-		t.Errorf("Read content expected %q, got %q", payload, read)
+	if string(read) != payload1+payload2 {
+		t.Errorf(
+			"Read content expected %q, got %q",
+			payload1+payload2,
+			read,
+		)
 	}
 	if prot := reader.Protocol(); prot != THeaderSubprotocolBinary {
 		t.Errorf(
@@ -83,7 +101,7 @@ func TestTHeaderHeadersReadWrite(t *testing.T) {
 	headers := reader.GetReadHeaders()
 	if len(headers) != 2 || headers[key1] != value1 || headers[key2] != value2 {
 		t.Errorf(
-			"reader.GetReadHeaders() expected size 1, actual %+v",
+			"reader.GetReadHeaders() expected size 2, actual content: %+v",
 			headers,
 		)
 	}
