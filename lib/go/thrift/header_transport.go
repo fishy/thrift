@@ -31,7 +31,7 @@ import (
 	"io/ioutil"
 )
 
-// Size in bytes for 32-bin ints.
+// Size in bytes for 32-bit ints.
 const size32 = 4
 
 type headerMeta struct {
@@ -63,10 +63,10 @@ type byteReader interface {
 // Constants defined in THeader format:
 // https://github.com/apache/thrift/blob/master/doc/specs/HeaderFormat.md
 const (
-	THeaderHeaderMagic  uint32 = 0x0FFF0000
-	THeaderHeaderMask   uint32 = 0xFFFF0000
-	THeaderFlagsMask    uint32 = 0x0000FFFF
-	THeaderMaxFrameSize uint32 = 0x3FFFFFFF
+	THeaderHeaderMagic  uint32 = 0x0fff0000
+	THeaderHeaderMask   uint32 = 0xffff0000
+	THeaderFlagsMask    uint32 = 0x0000ffff
+	THeaderMaxFrameSize uint32 = 0x3fffffff
 )
 
 // THeaderMap is the type of the header map in THeader transport.
@@ -124,11 +124,11 @@ var _ io.ReadCloser = (*TransformReader)(nil)
 // NewTransformReaderWithCapacity initializes a TransformReader with expected
 // closers capacity.
 //
-// If you don't know the closers capacity before hand, just use
+// If you don't know the closers capacity beforehand, just use
 //
 //     &TransformReader{Reader: baseReader}
 //
-// would be sufficient.
+// instead would be sufficient.
 func NewTransformReaderWithCapacity(baseReader io.Reader, capacity int) *TransformReader {
 	return &TransformReader{
 		Reader:  baseReader,
@@ -227,7 +227,7 @@ type THeaderInfoType int
 
 // Supported THeaderInfoType values.
 const (
-	_            THeaderInfoType = iota // skip 0
+	_            THeaderInfoType = iota // Skip 0
 	InfoKeyValue                        // 1
 	// Rest of the info types are not supported.
 )
@@ -314,7 +314,7 @@ func (t *THeaderTransport) ReadFrame() error {
 		return nil
 	}
 
-	// Now we are somewhat certain that it should be a framed message,
+	// At this point it should be a framed message,
 	// sanity check on frameSize then discard the peeked part.
 	if frameSize > THeaderMaxFrameSize {
 		return NewTProtocolExceptionWithType(
@@ -324,6 +324,7 @@ func (t *THeaderTransport) ReadFrame() error {
 	}
 	t.reader.Discard(size32)
 
+	// Read the frame fully into frameBuffer.
 	_, err = io.Copy(
 		&t.frameBuffer,
 		io.LimitReader(t.reader, int64(frameSize)),
@@ -357,7 +358,7 @@ func (t *THeaderTransport) ReadFrame() error {
 	)
 }
 
-// endOfFrame does end of frame handlings.
+// endOfFrame does end of frame handling.
 //
 // It closes frameReader, and also resets frame related states.
 func (t *THeaderTransport) endOfFrame() error {
@@ -481,13 +482,15 @@ func (t *THeaderTransport) needReadFrame() bool {
 }
 
 func (t *THeaderTransport) Read(p []byte) (read int, err error) {
-	if err = t.ReadFrame(); err != nil {
+	err = t.ReadFrame()
+	if err != nil {
 		return
 	}
 	if t.frameReader != nil {
 		read, err = t.frameReader.Read(p)
 		if err == io.EOF {
-			if err = t.endOfFrame(); err != nil {
+			err = t.endOfFrame()
+			if err != nil {
 				return
 			}
 			if read < len(p) {
@@ -501,8 +504,9 @@ func (t *THeaderTransport) Read(p []byte) (read int, err error) {
 	return t.reader.Read(p)
 }
 
-// Write writes data to the write buffer. You need to call Flush at the end of
-// the message to actually write them to the transport.
+// Write writes data to the write buffer.
+//
+// You need to call Flush to actually write them to the transport.
 func (t *THeaderTransport) Write(p []byte) (int, error) {
 	return t.writeBuffer.Write(p)
 }
@@ -659,7 +663,7 @@ func (t *THeaderTransport) AddTransform(transform THeaderTransformID) error {
 
 // Protocol returns the subprotocol id used in this THeaderTransport.
 //
-// It's guaranteed to return a supported subprotocol id.
+// It's guaranteed to be a supported subprotocol id.
 func (t *THeaderTransport) Protocol() THeaderSubprotocolID {
 	switch t.clientType {
 	default:
