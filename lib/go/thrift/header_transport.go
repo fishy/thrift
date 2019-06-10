@@ -262,6 +262,14 @@ type THeaderTransport struct {
 
 	clientType clientType
 	protocolID THeaderSubprotocolID
+
+	// buffer is used in the following scenarios to avoid repetitive
+	// allocations, while 16 is big enough for all those scenarios:
+	//
+	// * header padding (max size 4)
+	// * write the frame size (size 4)
+	// * writeVarint (max size binary.MaxVarintLen64, which is 10)
+	buffer [16]byte
 }
 
 var _ TTransport = (*THeaderTransport)(nil)
@@ -523,36 +531,39 @@ func (t *THeaderTransport) Flush(ctx context.Context) error {
 		fallthrough
 	case clientHeaders:
 		var headers bytes.Buffer
-		if err := writeVarint(&headers, int64(t.protocolID)); err != nil {
+		if err := t.writeVarint(&headers, int64(t.protocolID)); err != nil {
 			return NewTTransportExceptionFromError(err)
 		}
-		if err := writeVarint(&headers, int64(len(t.writeTransforms))); err != nil {
+		if err := t.writeVarint(&headers, int64(len(t.writeTransforms))); err != nil {
 			return NewTTransportExceptionFromError(err)
 		}
 		for _, transform := range t.writeTransforms {
-			if err := writeVarint(&headers, int64(transform)); err != nil {
+			if err := t.writeVarint(&headers, int64(transform)); err != nil {
 				return NewTTransportExceptionFromError(err)
 			}
 		}
 		if len(t.writeHeaders) > 0 {
-			if err := writeVarint(&headers, int64(InfoKeyValue)); err != nil {
+			if err := t.writeVarint(&headers, int64(InfoKeyValue)); err != nil {
 				return NewTTransportExceptionFromError(err)
 			}
-			if err := writeVarint(&headers, int64(len(t.writeHeaders))); err != nil {
+			if err := t.writeVarint(&headers, int64(len(t.writeHeaders))); err != nil {
 				return NewTTransportExceptionFromError(err)
 			}
 			for key, value := range t.writeHeaders {
-				if err := writeString(&headers, key); err != nil {
+				if err := t.writeString(&headers, key); err != nil {
 					return NewTTransportExceptionFromError(err)
 				}
-				if err := writeString(&headers, value); err != nil {
+				if err := t.writeString(&headers, value); err != nil {
 					return NewTTransportExceptionFromError(err)
 				}
 			}
 		}
 		padding := 4 - headers.Len()%4
 		if padding < 4 {
-			buf := make([]byte, padding)
+			buf := t.buffer[:padding]
+			for i := range buf {
+				buf[i] = 0
+			}
 			if _, err := headers.Write(buf); err != nil {
 				return NewTTransportExceptionFromError(err)
 			}
@@ -583,7 +594,7 @@ func (t *THeaderTransport) Flush(ctx context.Context) error {
 		}
 
 		// First write frame length
-		buf := make([]byte, size32)
+		buf := t.buffer[:size32]
 		binary.BigEndian.PutUint32(buf, uint32(payload.Len()))
 		if _, err := t.transport.Write(buf); err != nil {
 			return NewTTransportExceptionFromError(err)
@@ -594,7 +605,7 @@ func (t *THeaderTransport) Flush(ctx context.Context) error {
 		}
 
 	case clientFramedBinary, clientFramedCompact:
-		buf := make([]byte, size32)
+		buf := t.buffer[:size32]
 		binary.BigEndian.PutUint32(buf, uint32(t.writeBuffer.Len()))
 		if _, err := t.transport.Write(buf); err != nil {
 			return NewTTransportExceptionFromError(err)
@@ -684,6 +695,21 @@ func (t *THeaderTransport) isFramed() bool {
 	}
 }
 
+func (t *THeaderTransport) writeVarint(w io.Writer, v int64) error {
+	buf := t.buffer[:binary.MaxVarintLen64]
+	written := binary.PutVarint(buf, v)
+	_, err := w.Write(buf[:written])
+	return NewTTransportExceptionFromError(err)
+}
+
+func (t *THeaderTransport) writeString(w io.Writer, s string) error {
+	if err := t.writeVarint(w, int64(len(s))); err != nil {
+		return NewTTransportExceptionFromError(err)
+	}
+	_, err := w.Write([]byte(s))
+	return NewTTransportExceptionFromError(err)
+}
+
 func readString(r byteReader) (string, error) {
 	size, err := binary.ReadVarint(r)
 	if err != nil {
@@ -698,19 +724,4 @@ func readString(r byteReader) (string, error) {
 	buf := make([]byte, size)
 	read, err := r.Read(buf)
 	return string(buf[:read]), err
-}
-
-func writeVarint(w io.Writer, v int64) error {
-	var buf [binary.MaxVarintLen64]byte
-	written := binary.PutVarint(buf[:], v)
-	_, err := w.Write(buf[:written])
-	return NewTTransportExceptionFromError(err)
-}
-
-func writeString(w io.Writer, s string) error {
-	if err := writeVarint(w, int64(len(s))); err != nil {
-		return NewTTransportExceptionFromError(err)
-	}
-	_, err := w.Write([]byte(s))
-	return NewTTransportExceptionFromError(err)
 }
