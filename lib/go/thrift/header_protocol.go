@@ -96,13 +96,11 @@ func (p *THeaderProtocol) Flush(ctx context.Context) error {
 }
 
 func (p *THeaderProtocol) WriteMessageBegin(name string, typeID TMessageType, seqID int32) error {
-	if p.protocol == nil {
-		var err error
-		p.protocol, err = p.transport.Protocol().GetProtocol(p.transport)
-		if err != nil {
-			return err
-		}
+	newProto, err := p.transport.Protocol().GetProtocol(p.transport)
+	if err != nil {
+		return err
 	}
+	p.protocol = newProto
 	p.transport.SequenceID = seqID
 	return p.protocol.WriteMessageBegin(name, typeID, seqID)
 }
@@ -194,10 +192,30 @@ func (p *THeaderProtocol) ReadMessageBegin() (name string, typeID TMessageType, 
 	if err = p.transport.ReadFrame(); err != nil {
 		return
 	}
-	p.protocol, err = p.transport.Protocol().GetProtocol(p.transport)
+
+	var newProto TProtocol
+	newProto, err = p.transport.Protocol().GetProtocol(p.transport)
 	if err != nil {
+		tAppExc, ok := err.(TApplicationException)
+		if !ok {
+			return
+		}
+		if e := p.protocol.WriteMessageBegin("", EXCEPTION, seqID); e != nil {
+			return
+		}
+		if e := tAppExc.Write(p.protocol); e != nil {
+			return
+		}
+		if e := p.protocol.WriteMessageEnd(); e != nil {
+			return
+		}
+		if e := p.transport.Flush(context.Background()); e != nil {
+			return
+		}
 		return
 	}
+	p.protocol = newProto
+
 	return p.protocol.ReadMessageBegin()
 }
 

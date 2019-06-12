@@ -86,9 +86,9 @@ const (
 func (id THeaderSubprotocolID) GetProtocol(trans TTransport) (TProtocol, error) {
 	switch id {
 	default:
-		return nil, NewTProtocolExceptionWithType(
-			NOT_IMPLEMENTED,
-			fmt.Errorf("THeader subprotocol id %d not supported", id),
+		return nil, NewTApplicationException(
+			INVALID_PROTOCOL,
+			fmt.Sprintf("THeader subprotocol id %d not supported", id),
 		)
 	case THeaderSubprotocolBinary:
 		return NewTBinaryProtocolFactoryDefault().GetProtocol(trans), nil
@@ -152,9 +152,9 @@ func (tr *TransformReader) Close() error {
 func (tr *TransformReader) AddTransform(id THeaderTransformID) error {
 	switch id {
 	default:
-		return NewTProtocolExceptionWithType(
-			NOT_IMPLEMENTED,
-			fmt.Errorf("THeaderTransformID %d not supported", id),
+		return NewTApplicationException(
+			INVALID_TRANSFORM,
+			fmt.Sprintf("THeaderTransformID %d not supported", id),
 		)
 	case TransformNone:
 		// no-op
@@ -208,9 +208,9 @@ func (tw *TransformWriter) Close() error {
 func (tw *TransformWriter) AddTransform(id THeaderTransformID) error {
 	switch id {
 	default:
-		return NewTProtocolExceptionWithType(
-			NOT_IMPLEMENTED,
-			fmt.Errorf("THeaderTransformID %d not supported", id),
+		return NewTApplicationException(
+			INVALID_TRANSFORM,
+			fmt.Sprintf("THeaderTransformID %d not supported", id),
 		)
 	case TransformNone:
 		// no-op
