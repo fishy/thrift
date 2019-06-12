@@ -73,7 +73,7 @@ const (
 type THeaderMap map[string]string
 
 // THeaderSubprotocolID is the subprotocol id used in THeader protocol.
-type THeaderSubprotocolID int64
+type THeaderSubprotocolID int32
 
 // Supported THeaderSubprotocolID values.
 const (
@@ -98,7 +98,7 @@ func (id THeaderSubprotocolID) GetProtocol(trans TTransport) (TProtocol, error) 
 }
 
 // THeaderTransformID defines the numeric id of the transform used.
-type THeaderTransformID int
+type THeaderTransformID int32
 
 // THeaderTransformID values
 const (
@@ -223,7 +223,7 @@ func (tw *TransformWriter) AddTransform(id THeaderTransformID) error {
 }
 
 // THeaderInfoType is the type id of the info headers.
-type THeaderInfoType int
+type THeaderInfoType int32
 
 // Supported THeaderInfoType values.
 const (
@@ -264,12 +264,11 @@ type THeaderTransport struct {
 	protocolID THeaderSubprotocolID
 
 	// buffer is used in the following scenarios to avoid repetitive
-	// allocations, while 16 is big enough for all those scenarios:
+	// allocations, while 4 is big enough for all those scenarios:
 	//
 	// * header padding (max size 4)
 	// * write the frame size (size 4)
-	// * writeVarint (max size binary.MaxVarintLen64, which is 10)
-	buffer [16]byte
+	buffer [4]byte
 }
 
 var _ TTransport = (*THeaderTransport)(nil)
@@ -397,21 +396,22 @@ func (t *THeaderTransport) parseHeaders(frameSize uint32) error {
 			errors.New("header size is larger than the whole frame"),
 		)
 	}
-	var headerBuf bytes.Buffer
-	_, err = io.Copy(&headerBuf, io.LimitReader(&t.frameBuffer, headerLength))
+	headerBuf := NewTMemoryBuffer()
+	_, err = io.Copy(headerBuf, io.LimitReader(&t.frameBuffer, headerLength))
 	if err != nil {
 		return err
 	}
+	hp := NewTCompactProtocol(headerBuf)
 
 	// At this point the header is already read into headerBuf,
 	// and t.frameBuffer starts from the actual payload.
-	protoID, err := binary.ReadVarint(&headerBuf)
+	protoID, err := hp.readVarint32()
 	if err != nil {
 		return err
 	}
 	t.protocolID = THeaderSubprotocolID(protoID)
-	var transformCount int64
-	transformCount, err = binary.ReadVarint(&headerBuf)
+	var transformCount int32
+	transformCount, err = hp.readVarint32()
 	if err != nil {
 		return err
 	}
@@ -423,7 +423,7 @@ func (t *THeaderTransport) parseHeaders(frameSize uint32) error {
 		t.frameReader = reader
 		transformIDs := make([]THeaderTransformID, transformCount)
 		for i := 0; i < int(transformCount); i++ {
-			id, err := binary.ReadVarint(&headerBuf)
+			id, err := hp.readVarint32()
 			if err != nil {
 				return err
 			}
@@ -443,7 +443,7 @@ func (t *THeaderTransport) parseHeaders(frameSize uint32) error {
 	// important to continue using headerBuf.
 	headers := make(THeaderMap)
 	for {
-		infoType, err := binary.ReadVarint(&headerBuf)
+		infoType, err := hp.readVarint32()
 		if err == io.EOF {
 			break
 		}
@@ -451,16 +451,16 @@ func (t *THeaderTransport) parseHeaders(frameSize uint32) error {
 			return err
 		}
 		if THeaderInfoType(infoType) == InfoKeyValue {
-			count, err := binary.ReadVarint(&headerBuf)
+			count, err := hp.readVarint32()
 			if err != nil {
 				return err
 			}
 			for i := 0; i < int(count); i++ {
-				key, err := readString(&headerBuf)
+				key, err := hp.ReadString()
 				if err != nil {
 					return err
 				}
-				value, err := readString(&headerBuf)
+				value, err := hp.ReadString()
 				if err != nil {
 					return err
 				}
@@ -534,30 +534,31 @@ func (t *THeaderTransport) Flush(ctx context.Context) error {
 		t.clientType = clientHeaders
 		fallthrough
 	case clientHeaders:
-		var headers bytes.Buffer
-		if err := t.writeVarint(&headers, int64(t.protocolID)); err != nil {
+		headers := NewTMemoryBuffer()
+		hp := NewTCompactProtocol(headers)
+		if _, err := hp.writeVarint32(int32(t.protocolID)); err != nil {
 			return NewTTransportExceptionFromError(err)
 		}
-		if err := t.writeVarint(&headers, int64(len(t.writeTransforms))); err != nil {
+		if _, err := hp.writeVarint32(int32(len(t.writeTransforms))); err != nil {
 			return NewTTransportExceptionFromError(err)
 		}
 		for _, transform := range t.writeTransforms {
-			if err := t.writeVarint(&headers, int64(transform)); err != nil {
+			if _, err := hp.writeVarint32(int32(transform)); err != nil {
 				return NewTTransportExceptionFromError(err)
 			}
 		}
 		if len(t.writeHeaders) > 0 {
-			if err := t.writeVarint(&headers, int64(InfoKeyValue)); err != nil {
+			if _, err := hp.writeVarint32(int32(InfoKeyValue)); err != nil {
 				return NewTTransportExceptionFromError(err)
 			}
-			if err := t.writeVarint(&headers, int64(len(t.writeHeaders))); err != nil {
+			if _, err := hp.writeVarint32(int32(len(t.writeHeaders))); err != nil {
 				return NewTTransportExceptionFromError(err)
 			}
 			for key, value := range t.writeHeaders {
-				if err := t.writeString(&headers, key); err != nil {
+				if err := hp.WriteString(key); err != nil {
 					return NewTTransportExceptionFromError(err)
 				}
-				if err := t.writeString(&headers, value); err != nil {
+				if err := hp.WriteString(value); err != nil {
 					return NewTTransportExceptionFromError(err)
 				}
 			}
@@ -582,7 +583,7 @@ func (t *THeaderTransport) Flush(ctx context.Context) error {
 		if err := binary.Write(&payload, binary.BigEndian, meta); err != nil {
 			return NewTTransportExceptionFromError(err)
 		}
-		if _, err := io.Copy(&payload, &headers); err != nil {
+		if _, err := io.Copy(&payload, headers); err != nil {
 			return NewTTransportExceptionFromError(err)
 		}
 
@@ -697,35 +698,4 @@ func (t *THeaderTransport) isFramed() bool {
 	case clientHeaders, clientFramedBinary, clientFramedCompact:
 		return true
 	}
-}
-
-func (t *THeaderTransport) writeVarint(w io.Writer, v int64) error {
-	buf := t.buffer[:binary.MaxVarintLen64]
-	written := binary.PutVarint(buf, v)
-	_, err := w.Write(buf[:written])
-	return NewTTransportExceptionFromError(err)
-}
-
-func (t *THeaderTransport) writeString(w io.Writer, s string) error {
-	if err := t.writeVarint(w, int64(len(s))); err != nil {
-		return NewTTransportExceptionFromError(err)
-	}
-	_, err := w.Write([]byte(s))
-	return NewTTransportExceptionFromError(err)
-}
-
-func readString(r byteReader) (string, error) {
-	size, err := binary.ReadVarint(r)
-	if err != nil {
-		return "", err
-	}
-	if size < 0 {
-		return "", NewTProtocolExceptionWithType(
-			NEGATIVE_SIZE,
-			fmt.Errorf("negative size %d for string data", size),
-		)
-	}
-	buf := make([]byte, size)
-	read, err := r.Read(buf)
-	return string(buf[:read]), err
 }
