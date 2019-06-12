@@ -53,13 +53,6 @@ const (
 	clientUnframedCompact
 )
 
-// byteReader is the combined interface of io.ByteReader and io.Reader, needed
-// by readString.
-type byteReader interface {
-	io.ByteReader
-	io.Reader
-}
-
 // Constants defined in THeader format:
 // https://github.com/apache/thrift/blob/master/doc/specs/HeaderFormat.md
 const (
