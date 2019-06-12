@@ -521,6 +521,10 @@ func (t *THeaderTransport) Write(p []byte) (int, error) {
 
 // Flush writes the appropriate header and the write buffer to the underlying transport.
 func (t *THeaderTransport) Flush(ctx context.Context) error {
+	if t.writeBuffer.Len() == 0 {
+		return nil
+	}
+
 	defer t.writeBuffer.Reset()
 
 	switch t.clientType {
