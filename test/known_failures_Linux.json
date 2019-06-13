@@ -363,6 +363,8 @@
   "nodejs-go_binary_http-ip-ssl",
   "nodejs-go_compact_http-ip",
   "nodejs-go_compact_http-ip-ssl",
+  "nodejs-go_header_http-ip",
+  "nodejs-go_header_http-ip-ssl",
   "nodejs-go_json_http-ip",
   "nodejs-go_json_http-ip-ssl",
   "nodejs-hs_binary_http-ip",
