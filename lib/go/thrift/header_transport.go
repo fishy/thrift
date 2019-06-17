@@ -65,27 +65,27 @@ const (
 // THeaderMap is the type of the header map in THeader transport.
 type THeaderMap map[string]string
 
-// THeaderSubprotocolID is the subprotocol id used in THeader protocol.
-type THeaderSubprotocolID int32
+// THeaderProtocolID is the wrapped protocol id used in THeader.
+type THeaderProtocolID int32
 
-// Supported THeaderSubprotocolID values.
+// Supported THeaderProtocolID values.
 const (
-	THeaderSubprotocolBinary  THeaderSubprotocolID = 0x00
-	THeaderSubprotocolCompact THeaderSubprotocolID = 0x02
-	THeaderSubprotocolDefault                      = THeaderSubprotocolBinary
+	THeaderProtocolBinary  THeaderProtocolID = 0x00
+	THeaderProtocolCompact THeaderProtocolID = 0x02
+	THeaderProtocolDefault                   = THeaderProtocolBinary
 )
 
-// GetProtocol gets the corresponding TProtocol from the subprotocol id.
-func (id THeaderSubprotocolID) GetProtocol(trans TTransport) (TProtocol, error) {
+// GetProtocol gets the corresponding TProtocol from the wrapped protocol id.
+func (id THeaderProtocolID) GetProtocol(trans TTransport) (TProtocol, error) {
 	switch id {
 	default:
 		return nil, NewTApplicationException(
 			INVALID_PROTOCOL,
-			fmt.Sprintf("THeader subprotocol id %d not supported", id),
+			fmt.Sprintf("THeader protocol id %d not supported", id),
 		)
-	case THeaderSubprotocolBinary:
+	case THeaderProtocolBinary:
 		return NewTBinaryProtocolFactoryDefault().GetProtocol(trans), nil
-	case THeaderSubprotocolCompact:
+	case THeaderProtocolCompact:
 		return NewTCompactProtocol(trans), nil
 	}
 }
@@ -254,7 +254,7 @@ type THeaderTransport struct {
 	writeTransforms []THeaderTransformID
 
 	clientType clientType
-	protocolID THeaderSubprotocolID
+	protocolID THeaderProtocolID
 
 	// buffer is used in the following scenarios to avoid repetitive
 	// allocations, while 4 is big enough for all those scenarios:
@@ -276,7 +276,7 @@ func NewTHeaderTransport(trans TTransport) *THeaderTransport {
 		transport:    trans,
 		reader:       bufio.NewReader(trans),
 		writeHeaders: make(THeaderMap),
-		protocolID:   THeaderSubprotocolDefault,
+		protocolID:   THeaderProtocolDefault,
 	}
 }
 
@@ -402,7 +402,7 @@ func (t *THeaderTransport) parseHeaders(frameSize uint32) error {
 	if err != nil {
 		return err
 	}
-	t.protocolID = THeaderSubprotocolID(protoID)
+	t.protocolID = THeaderProtocolID(protoID)
 	var transformCount int32
 	transformCount, err = hp.readVarint32()
 	if err != nil {
@@ -670,17 +670,15 @@ func (t *THeaderTransport) AddTransform(transform THeaderTransformID) error {
 	return nil
 }
 
-// Protocol returns the subprotocol id used in this THeaderTransport.
-//
-// It's guaranteed to be a supported subprotocol id.
-func (t *THeaderTransport) Protocol() THeaderSubprotocolID {
+// Protocol returns the wrapped protocol id used in this THeaderTransport.
+func (t *THeaderTransport) Protocol() THeaderProtocolID {
 	switch t.clientType {
 	default:
 		return t.protocolID
 	case clientFramedBinary, clientUnframedBinary:
-		return THeaderSubprotocolBinary
+		return THeaderProtocolBinary
 	case clientFramedCompact, clientUnframedCompact:
-		return THeaderSubprotocolCompact
+		return THeaderProtocolCompact
 	}
 }
 

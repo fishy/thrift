@@ -26,7 +26,7 @@ import (
 // THeaderProtocol is a thrift protocol that implements THeader:
 // https://github.com/apache/thrift/blob/master/doc/specs/HeaderFormat.md
 //
-// It supports either binary or compact protocol as the subprotocol.
+// It supports either binary or compact protocol as the wrapped protocol.
 //
 // Most of the THeader handlings are happening inside THeaderTransport.
 type THeaderProtocol struct {
@@ -44,7 +44,7 @@ type THeaderProtocol struct {
 // instead of rich transports like TZlibTransport or TFramedTransport.
 func NewTHeaderProtocol(trans TTransport) *THeaderProtocol {
 	t := NewTHeaderTransport(trans)
-	p, _ := THeaderSubprotocolDefault.GetProtocol(t)
+	p, _ := THeaderProtocolDefault.GetProtocol(t)
 	return &THeaderProtocol{
 		transport: t,
 		protocol:  p,

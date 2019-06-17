@@ -84,10 +84,10 @@ func TestTHeaderHeadersReadWrite(t *testing.T) {
 			read,
 		)
 	}
-	if prot := reader.Protocol(); prot != THeaderSubprotocolBinary {
+	if prot := reader.Protocol(); prot != THeaderProtocolBinary {
 		t.Errorf(
 			"reader.Protocol() expected %d, got %d",
-			THeaderSubprotocolBinary,
+			THeaderProtocolBinary,
 			prot,
 		)
 	}
