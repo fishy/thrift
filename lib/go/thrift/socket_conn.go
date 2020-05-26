@@ -96,12 +96,17 @@ func (sc *socketConn) Read(p []byte) (n int, err error) {
 		return 0, sc.read0()
 	}
 
-	n, err = sc.buf.Read(p)
-	if err != nil && err != io.EOF {
-		return
+	if sc.buf.Len() > 0 {
+		n, err = sc.buf.Read(p)
+		if err != nil && err != io.EOF {
+			return
+		}
+		if n == len(p) {
+			return n, nil
+		}
 	}
-	if n == len(p) {
-		return n, nil
+	if sc.buf.Len() == 0 {
+		sc.buf.Reset()
 	}
 	// Continue reading from the wire.
 	var newRead int
