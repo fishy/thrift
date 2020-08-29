@@ -21,18 +21,27 @@ package thrift
 
 import (
 	"net"
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
+// Because net.Listener is an interface, using it directly in atomic.Value poses
+// the risk of the concrete type changes, which would cause panic when calling
+// atomic.Value.Store. Using a wrapper type to make sure that the concrete type
+// stored inside atomic.Value never changes.
+//
+// This also makes storing nil listener possible.
+type listenerWrapper struct {
+	l net.Listener
+}
+
 type TServerSocket struct {
-	listener      net.Listener
 	addr          net.Addr
 	clientTimeout time.Duration
 
-	// Protects the interrupted value to make it thread safe.
-	mu          sync.RWMutex
-	interrupted bool
+	// Protected by only using atomic read/write.
+	listener    atomic.Value // actual type: *listenerWrapper
+	interrupted int32
 }
 
 func NewTServerSocket(listenAddr string) (*TServerSocket, error) {
@@ -52,9 +61,18 @@ func NewTServerSocketFromAddrTimeout(addr net.Addr, clientTimeout time.Duration)
 	return &TServerSocket{addr: addr, clientTimeout: clientTimeout}
 }
 
+func (p *TServerSocket) setListener(l net.Listener) {
+	p.listener.Store(&listenerWrapper{l: l})
+}
+
+func (p *TServerSocket) getListener() net.Listener {
+	if w, ok := p.listener.Load().(*listenerWrapper); ok && w != nil {
+		return w.l
+	}
+	return nil
+}
+
 func (p *TServerSocket) Listen() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.IsListening() {
 		return nil
 	}
@@ -62,22 +80,16 @@ func (p *TServerSocket) Listen() error {
 	if err != nil {
 		return err
 	}
-	p.listener = l
+	p.setListener(l)
 	return nil
 }
 
 func (p *TServerSocket) Accept() (TTransport, error) {
-	p.mu.RLock()
-	interrupted := p.interrupted
-	p.mu.RUnlock()
-
-	if interrupted {
+	if atomic.LoadInt32(&p.interrupted) != 0 {
 		return nil, errTransportInterrupted
 	}
 
-	p.mu.Lock()
-	listener := p.listener
-	p.mu.Unlock()
+	listener := p.getListener()
 	if listener == nil {
 		return nil, NewTTransportException(NOT_OPEN, "No underlying server socket")
 	}
@@ -91,46 +103,40 @@ func (p *TServerSocket) Accept() (TTransport, error) {
 
 // Checks whether the socket is listening.
 func (p *TServerSocket) IsListening() bool {
-	return p.listener != nil
+	return p.getListener() != nil
 }
 
 // Connects the socket, creating a new socket object if necessary.
 func (p *TServerSocket) Open() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.IsListening() {
 		return NewTTransportException(ALREADY_OPEN, "Server socket already open")
 	}
 	if l, err := net.Listen(p.addr.Network(), p.addr.String()); err != nil {
 		return err
 	} else {
-		p.listener = l
+		p.setListener(l)
 	}
 	return nil
 }
 
 func (p *TServerSocket) Addr() net.Addr {
-	if p.listener != nil {
-		return p.listener.Addr()
+	if l := p.getListener(); l != nil {
+		return l.Addr()
 	}
 	return p.addr
 }
 
 func (p *TServerSocket) Close() error {
 	var err error
-	p.mu.Lock()
-	if p.IsListening() {
-		err = p.listener.Close()
-		p.listener = nil
+	if l := p.getListener(); l != nil {
+		err = l.Close()
+		p.setListener(nil)
 	}
-	p.mu.Unlock()
 	return err
 }
 
 func (p *TServerSocket) Interrupt() error {
-	p.mu.Lock()
-	p.interrupted = true
-	p.mu.Unlock()
+	atomic.StoreInt32(&p.interrupted, 1)
 	p.Close()
 
 	return nil
